@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  deepisahol:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    platform: linux/amd64
+    container_name: deepisahol-api
+    ports:
+      - "8000:8000"
+    environment:
+      - PY4J_PORT=25333
+      - API_PORT=8000
+      - STARTUP_WAIT=30
+    # Memory limits - Isabelle requires significant memory
+    # Minimum: 8GB, Recommended: 16GB
+    deploy:
+      resources:
+        limits:
+          memory: 16G
+        reservations:
+          memory: 8G
+    # Health check with extended start period for Isabelle initialization
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    # Restart policy
+    restart: unless-stopped
+    # Optional: mount custom theories directory
+    # volumes:
+    #   - ./theories:/app/theories:ro
