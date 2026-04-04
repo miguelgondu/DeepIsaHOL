@@ -1,8 +1,13 @@
-/*  
-  Mantainers: 
+/*
+  Mantainers:
     Jonathan Julián Huerta y Munive huertjon[at]cvut[dot]cz
 
 Isabelle/RL directories: Adjust for your specific setup
+
+NOTE: When building with Docker, this file will be overwritten with container paths:
+  val isabelle_app = "/app/Isabelle2025-2/"
+  val isabelle_afp = "/app/afp/thys/"
+  val isabelle_rl = "/app/"
 */
 
 package isabelle_rl

@@ -1,1 +1,7 @@
 /lib/
+/target/
+/project/target/
+*.log
+ports.json
+__pycache__/
+*.pyc

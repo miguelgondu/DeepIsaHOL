@@ -1,0 +1,50 @@
+# Git
+.git
+.gitignore
+
+# Dependencies (will be downloaded in container)
+lib/
+target/
+project/target/
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.eggs
+*.egg
+.venv
+venv
+env
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+
+# Documentation
+*.pdf
+*.md
+
+# Misc
+.DS_Store
+Thumbs.db
+
+# Test data
+test_data/
+tests/
+
+# Local configuration
+*.local
+.env
+.env.*
+
+# Ports file (generated at runtime)
+ports.json
