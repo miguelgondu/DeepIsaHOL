@@ -32,14 +32,18 @@ RUN echo "deb https://repo.scala-sbt.org/scalasbt/debian all main" | tee /etc/ap
 WORKDIR /build
 
 # Download and extract Isabelle
+# SHA256 from https://isabelle.in.tum.de/dist/
 RUN echo "Downloading Isabelle 2025-2..." && \
-    curl -sO https://isabelle.in.tum.de/dist/Isabelle2025-2_linux.tar.gz && \
+    curl -sLO https://isabelle.in.tum.de/dist/Isabelle2025-2_linux.tar.gz && \
+    echo "a20a507bc7c1270d8be96a9f3fbec06345387789d2dc2c4d3df6260d47bfb33c  Isabelle2025-2_linux.tar.gz" | sha256sum -c - && \
     tar -xzf Isabelle2025-2_linux.tar.gz && \
     rm Isabelle2025-2_linux.tar.gz
 
 # Download and extract AFP
+# SHA256 computed 2026-06-01 - update when AFP releases change
 RUN echo "Downloading AFP..." && \
-    curl -sO https://www.isa-afp.org/release/afp-current.tar.gz && \
+    curl -sLO https://www.isa-afp.org/release/afp-current.tar.gz && \
+    echo "872f85ed0d026bfd13940a3f76c6a8cd0e995c2f7c895dbd4671e84bc6ce39d0  afp-current.tar.gz" | sha256sum -c - && \
     tar -xzf afp-current.tar.gz && \
     rm afp-current.tar.gz && \
     mv afp-* afp
