@@ -33,17 +33,22 @@ WORKDIR /build
 
 # Download and extract Isabelle
 # SHA256 from https://isabelle.in.tum.de/dist/
+# NOTE: the plain /dist/ URL 302s to dist.isabelle.cit.tum.de, a mirror that is
+# unreachable from some networks (connection just times out). The /website-.../dist/
+# path below serves the same file directly from isabelle.in.tum.de with no redirect.
 RUN echo "Downloading Isabelle 2025-2..." && \
-    curl -sLO https://isabelle.in.tum.de/dist/Isabelle2025-2_linux.tar.gz && \
+    curl -sLO https://isabelle.in.tum.de/website-Isabelle2025-2/dist/Isabelle2025-2_linux.tar.gz && \
     echo "a20a507bc7c1270d8be96a9f3fbec06345387789d2dc2c4d3df6260d47bfb33c  Isabelle2025-2_linux.tar.gz" | sha256sum -c - && \
     tar -xzf Isabelle2025-2_linux.tar.gz && \
     rm Isabelle2025-2_linux.tar.gz
 
 # Download and extract AFP
-# SHA256 computed 2026-06-01 - update when AFP releases change
+# SHA256 computed 2026-08-25 - update when AFP releases change (afp-current.tar.gz is a
+# rolling snapshot, so this pin goes stale periodically and the build will fail with a
+# checksum mismatch when it does; recompute with `curl -sL <url> | sha256sum`)
 RUN echo "Downloading AFP..." && \
     curl -sLO https://www.isa-afp.org/release/afp-current.tar.gz && \
-    echo "872f85ed0d026bfd13940a3f76c6a8cd0e995c2f7c895dbd4671e84bc6ce39d0  afp-current.tar.gz" | sha256sum -c - && \
+    echo "58b2a181a017b7e2956d0f7d5d44d8dd6689873acaeee36bf13e6f2c6e55e0a3  afp-current.tar.gz" | sha256sum -c - && \
     tar -xzf afp-current.tar.gz && \
     rm afp-current.tar.gz && \
     mv afp-* afp

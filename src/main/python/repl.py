@@ -7,6 +7,7 @@ import os
 import json
 import logging
 import fcntl
+import time
 from py4j.java_gateway import JavaGateway, GatewayParameters
 
 class REPL:
@@ -18,25 +19,35 @@ class REPL:
     DEEPISAHOL_DIR = os.path.dirname(os.path.dirname(os.path.dirname(MAIN_DIR)))
     PORTS_FILE = os.path.join(DEEPISAHOL_DIR, "ports.json")
 
-    # INITIALIZATION 
+    # How long to wait for a gateway to free up before giving up. Ports are busy
+    # while other requests are being verified and free up as they finish (or while
+    # the pool is still starting up), so a missing/exhausted registry is often
+    # transient rather than a real failure.
+    ACQUIRE_PORT_TIMEOUT_SECONDS = 60
+    ACQUIRE_PORT_POLL_INTERVAL_SECONDS = 2
+
+    # INITIALIZATION
 
     def __init__(self, logic="HOL", thy_name="Scratch.thy"):
         self.logic = logic
         self.thy_name = thy_name
         self.port = self._acquire_port()
         if self.port is None:
-            raise RuntimeError("REPL: No available Py4j gateway found!")
+            raise RuntimeError(
+                "REPL: No available Py4j gateway found after waiting "
+                f"{self.ACQUIRE_PORT_TIMEOUT_SECONDS}s!"
+            )
         self._initialize_repl()
 
         log_file = f'repl_error_{self.port}.log'
         logging.basicConfig(filename=log_file, level=logging.ERROR,
                             format='%(asctime)s - %(levelname)s - %(message)s')
-        
-    def _acquire_port(self):
-        """Read gateway_registry.json, find available port, mark it busy, and return it. Thread-safe."""
+
+    def _try_acquire_port_once(self):
+        """Single attempt: find an available port, mark it busy, and return it. Thread-safe."""
         if not os.path.exists(self.PORTS_FILE):
             return None
-        
+
         with open(self.PORTS_FILE, "r+") as f:
             try:
                 fcntl.flock(f, fcntl.LOCK_EX)
@@ -54,6 +65,26 @@ class REPL:
             finally:
                 fcntl.flock(f, fcntl.LOCK_UN)
         return None
+
+    def _acquire_port(self):
+        """Poll for an available port until one frees up or we time out.
+
+        The registry file may not exist yet if Isabelle is still starting up, or
+        every port may be temporarily busy with other requests. Both are usually
+        resolved by waiting, so we retry instead of failing immediately.
+        """
+        deadline = time.monotonic() + self.ACQUIRE_PORT_TIMEOUT_SECONDS
+        while True:
+            port = self._try_acquire_port_once()
+            if port is not None:
+                return port
+            if time.monotonic() >= deadline:
+                return None
+            print(
+                "No Py4j gateway available yet, retrying in "
+                f"{self.ACQUIRE_PORT_POLL_INTERVAL_SECONDS}s..."
+            )
+            time.sleep(self.ACQUIRE_PORT_POLL_INTERVAL_SECONDS)
     
     def _release_port(self, port):
         """Mark the port as available again (for shutting down). Thread-safe."""
