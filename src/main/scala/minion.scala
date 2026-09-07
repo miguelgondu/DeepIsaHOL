@@ -30,10 +30,14 @@ class Isa_Minion (val work_dir: String, val logic: String, val imports_dir: Stri
   def this(logic: String = "HOL") = this(
     work_dir = System.getProperty("user.dir"),
     logic = logic,
-    imports_dir = Utils.get_logic_path(logic) match {
-      case Some(path) => path.toString
-      case None => System.getProperty("user.dir")
-    }
+    // Use the logic's own theory directory as the imports dir, but never for a
+    // session bundled with the Isabelle distribution (HOL, FOL, ZF, ...): those
+    // are prebuilt heaps whose source trees hold thousands of .thy files, and
+    // Imports would walk all of them on every construction. Fall back to the cwd.
+    imports_dir = Utils.get_logic_path(logic)
+      .filterNot(_.startsWith(Path.of(Directories.isabelle_app)))
+      .map(_.toString)
+      .getOrElse(System.getProperty("user.dir"))
   )
 
 

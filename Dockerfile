@@ -42,19 +42,25 @@ RUN echo "Downloading Isabelle 2025-2..." && \
     tar -xzf Isabelle2025-2_linux.tar.gz && \
     rm Isabelle2025-2_linux.tar.gz
 
-# Download and extract AFP
-# SHA256 computed 2026-08-25 - update when AFP releases change (afp-current.tar.gz is a
-# rolling snapshot, so this pin goes stale periodically and the build will fail with a
-# checksum mismatch when it does; recompute with `curl -sL <url> | sha256sum`)
-RUN echo "Downloading AFP..." && \
-    curl -sLO https://www.isa-afp.org/release/afp-current.tar.gz && \
-    echo "58b2a181a017b7e2956d0f7d5d44d8dd6689873acaeee36bf13e6f2c6e55e0a3  afp-current.tar.gz" | sha256sum -c - && \
-    tar -xzf afp-current.tar.gz && \
-    rm afp-current.tar.gz && \
-    mv afp-* afp
+# NOTE: the Archive of Formal Proofs (AFP) is intentionally NOT installed in this
+# image. The /verify path runs against the prebuilt HOL heap and never resolves AFP
+# sessions (see Utils.logics_map / Isa_Minion), and nothing that consumes this API
+# submits AFP-dependent theories or ROOTs. Bundling it added several GB to the image
+# plus a fragile rolling-snapshot checksum pin. To re-add it, restore the download +
+# `isabelle components -u ./afp/thys/` here and the matching COPY + register in the
+# runtime stage, and point Directories.isabelle_afp at /app/afp/thys/ below.
 
-# Register AFP with Isabelle
-RUN ./Isabelle2025-2/bin/isabelle components -u "./afp/thys/"
+# Pre-build the Isabelle library session heaps used by the benchmark (analysis,
+# probability, number theory, algebra, combinatorics, ...). `-s` writes the heaps
+# into the distribution tree ($ISABELLE_HOME/heaps), so the existing
+# `COPY --from=builder /build/Isabelle2025-2` in the runtime stage carries them.
+# Building `Benchmark` also builds+persists every session it depends on.
+#
+# This layer is EXPENSIVE: ~1-2 h wall time and ~8 GB RAM. It caches until
+# benchmark/ROOT changes. Tune -j / threads to the build host (more RAM -> raise them).
+COPY benchmark /build/benchmark
+RUN echo "Pre-building benchmark session heaps (this takes a while)..." && \
+    ./Isabelle2025-2/bin/isabelle build -b -s -j1 -o threads=2 -D /build/benchmark
 
 # Clone and build scala-isabelle dependency
 RUN git clone https://github.com/dominique-unruh/scala-isabelle.git && \
@@ -82,7 +88,7 @@ package isabelle_rl
 
 object Directories {
 val isabelle_app = "/app/Isabelle2025-2/"
-val isabelle_afp = "/app/afp/thys/"
+val isabelle_afp = "/app/afp/thys/" // AFP not installed in this image; inert path (Utils.valid_afp -> false)
 val isabelle_rl = "/app/"
 }
 EOF
@@ -124,11 +130,14 @@ WORKDIR /app
 # Copy Isabelle from builder
 COPY --from=builder /build/Isabelle2025-2 /app/Isabelle2025-2
 
-# Copy AFP from builder
-COPY --from=builder /build/afp /app/afp
-
 # Copy compiled project from builder
 COPY --from=builder /build/app /app
+
+# Copy the benchmark session dir and register it globally, so `isabelle build`
+# (used by the /build endpoint) can resolve `Benchmark` and the library sessions
+# as session parents. The prebuilt heaps themselves rode in with the Isabelle tree.
+COPY --from=builder /build/benchmark /app/benchmark
+RUN printf '%s\n' '/app/benchmark' >> /app/Isabelle2025-2/ROOTS
 
 # Copy sbt cache for faster startup
 COPY --from=builder /root/.sbt /root/.sbt
@@ -151,9 +160,6 @@ RUN pip3 install --no-cache-dir -r /app/docker/requirements.txt
 
 # Make entrypoint executable
 RUN chmod +x /app/docker/entrypoint.sh
-
-# Register AFP with Isabelle (ensure paths are correct in runtime)
-RUN /app/Isabelle2025-2/bin/isabelle components -u "/app/afp/thys/"
 
 # Expose the API port
 EXPOSE 8000

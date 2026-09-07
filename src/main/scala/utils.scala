@@ -22,7 +22,7 @@ import isabelle_rl.Graph
 object Utils {
   private val AFP_path = Paths.get(Directories.isabelle_afp)
   private val AFP_ROOTS = new File(AFP_path.resolve("ROOTS").toString())
-  private val isa_app_path = Paths.get(Directories.isabelle_afp)
+  private val isa_app_path = Paths.get(Directories.isabelle_app)
   private val isa_app_ROOTS = new File(isa_app_path.resolve("ROOTS").toString())
   private val debug = false
 
