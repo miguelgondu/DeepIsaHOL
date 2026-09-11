@@ -5,6 +5,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Benchmark heap-build parallelism. Empty THREADS => auto (all CPUs the
+        # build sees, capped by RAM). Override, e.g.
+        # BENCHMARK_THREADS=6 BENCHMARK_JOBS=2 docker compose build deepisahol
+        BENCHMARK_THREADS: ${BENCHMARK_THREADS:-}
+        BENCHMARK_JOBS: ${BENCHMARK_JOBS:-1}
     platform: linux/amd64
     container_name: deepisahol-api
     ports:

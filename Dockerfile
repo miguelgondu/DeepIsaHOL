@@ -51,16 +51,40 @@ RUN echo "Downloading Isabelle 2025-2..." && \
 # runtime stage, and point Directories.isabelle_afp at /app/afp/thys/ below.
 
 # Pre-build the Isabelle library session heaps used by the benchmark (analysis,
-# probability, number theory, algebra, combinatorics, ...). `-s` writes the heaps
-# into the distribution tree ($ISABELLE_HOME/heaps), so the existing
-# `COPY --from=builder /build/Isabelle2025-2` in the runtime stage carries them.
-# Building `Benchmark` also builds+persists every session it depends on.
+# probability, number theory, algebra, combinatorics, ...). `-o system_heaps`
+# writes the heaps into the distribution tree ($ISABELLE_HOME/heaps) instead of
+# the per-user dir, so the existing `COPY --from=builder /build/Isabelle2025-2`
+# in the runtime stage carries them (the runtime `isabelle build` still searches
+# the system heap dir as a fallback with system_heaps=false). Building
+# `Benchmark` also builds+persists every session it depends on.
 #
-# This layer is EXPENSIVE: ~1-2 h wall time and ~8 GB RAM. It caches until
-# benchmark/ROOT changes. Tune -j / threads to the build host (more RAM -> raise them).
+# This layer is EXPENSIVE: ~1-2 h wall time. It caches until benchmark/ROOT changes.
+#
+# Parallelism (override at build time, e.g. --build-arg BENCHMARK_THREADS=6):
+#   BENCHMARK_THREADS - `-o threads`, parallelism *within* a session. Empty (the
+#                       default) => auto: all CPUs the build sees ($(nproc)),
+#                       capped at ~1 per 3 GB of RAM so it can't OOM-kill itself
+#                       (each Isabelle worker wants 2-4 GB). This is the knob that
+#                       speeds up the big serial sessions (HOL-Analysis/Probability).
+#   BENCHMARK_JOBS    - `-j`, how many sessions build concurrently (default 1).
+#                       Helps the sibling-session tail; total load is roughly
+#                       JOBS * THREADS, so keep that under your core/RAM budget.
+ARG BENCHMARK_THREADS=""
+ARG BENCHMARK_JOBS=1
 COPY benchmark /build/benchmark
-RUN echo "Pre-building benchmark session heaps (this takes a while)..." && \
-    ./Isabelle2025-2/bin/isabelle build -b -s -j1 -o threads=2 -D /build/benchmark
+RUN set -eu; \
+    cores="$(nproc)"; \
+    mem_gb="$(awk '/^MemTotal:/ {printf "%d", $2 / 1024 / 1024}' /proc/meminfo)"; \
+    [ -n "$mem_gb" ] && [ "$mem_gb" -ge 1 ] 2>/dev/null || mem_gb=4; \
+    mem_cap=$(( mem_gb / 3 )); \
+    if [ "$mem_cap" -lt 1 ]; then mem_cap=1; fi; \
+    auto="$cores"; \
+    if [ "$auto" -gt "$mem_cap" ]; then auto="$mem_cap"; fi; \
+    threads="${BENCHMARK_THREADS:-$auto}"; \
+    echo "Pre-building benchmark heaps: cores=$cores mem=${mem_gb}G -> threads=$threads jobs=${BENCHMARK_JOBS}"; \
+    echo "  (override with --build-arg BENCHMARK_THREADS=N / BENCHMARK_JOBS=N)"; \
+    ./Isabelle2025-2/bin/isabelle build -b -o system_heaps \
+        -j"${BENCHMARK_JOBS}" -o threads="$threads" -D /build/benchmark
 
 # Clone and build scala-isabelle dependency
 RUN git clone https://github.com/dominique-unruh/scala-isabelle.git && \
