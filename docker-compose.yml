@@ -19,6 +19,10 @@ services:
       - PY4J_PORT=25333
       - API_PORT=8000
       - STARTUP_WAIT=30
+      # Max concurrent `isabelle build` calls. Kept low relative to the
+      # memory limits below — each build maps the full Benchmark heap into
+      # its own process, so too much concurrency risks the OOM killer.
+      - BUILD_MAX_WORKERS=${BUILD_MAX_WORKERS:-2}
     # Memory limits - Isabelle requires significant memory
     # Minimum: 8GB, Recommended: 16GB
     deploy:

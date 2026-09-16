@@ -11,6 +11,7 @@ import logging
 import tempfile
 import subprocess
 import shutil
+import signal
 import time
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -32,8 +33,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Thread pool for blocking Isabelle operations
-executor = ThreadPoolExecutor(max_workers=4)
+# Thread pool for blocking Isabelle operations. Each `isabelle build` call
+# maps the full prebuilt Benchmark heap (HOL-Analysis, HOL-Algebra, etc.) into
+# its own process — docker-compose.yml's own sizing note says a single build
+# wants 8-16GB against this container's 16GB hard cap, so running several of
+# these at once risks the OOM killer (see the signal-kill handling in
+# `_build_session_sync`). Default kept low for that reason; override via
+# BUILD_MAX_WORKERS if the container is sized for more.
+BUILD_MAX_WORKERS = int(os.environ.get("BUILD_MAX_WORKERS", "2"))
+executor = ThreadPoolExecutor(max_workers=BUILD_MAX_WORKERS)
 
 
 class VerifyRequest(BaseModel):
@@ -499,6 +507,52 @@ ALLOWED_BUILD_OPTIONS = {"-v", "-j", "-N", "-o"}
 SESSION_NAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 
 
+def _signal_name_from_returncode(returncode: int) -> str | None:
+    """Best-effort: was this exit code a signal kill, not a normal exit?
+
+    Covers two conventions, since we can't be sure which layer of the
+    process tree reports the kill:
+    - Negative (Python/POSIX ``subprocess`` convention): our direct child —
+      the ``isabelle`` wrapper/JVM process — was itself signaled.
+    - ``128 + signum`` (POSIX shell convention, e.g. 137 for SIGKILL): common
+      when a wrapping shell reports a killed child's exit status this way.
+
+    Neither convention fires if the OOM killer instead takes one of
+    ``isabelle build``'s own ML worker subprocesses while the parent JVM
+    survives and exits "normally" with its own nonzero code — that case
+    isn't a signal kill by either convention, so it's caught separately by
+    the content-based check in ``_build_session_sync`` (empty ``errors``
+    despite ``built=False``).
+    """
+    if returncode < 0:
+        signum = -returncode
+    elif 128 < returncode <= 128 + 64:  # 64 covers up through SIGRTMAX
+        signum = returncode - 128
+    else:
+        return None
+    try:
+        return signal.Signals(signum).name
+    except ValueError:
+        return str(signum)
+
+
+# Substrings that show up when a build crashed or was killed before it could
+# produce a proper Isar error — seen in practice from the OOM killer, but
+# also covers other infra-level crashes (JVM heap errors, native segfaults)
+# that don't fit the exit-code conventions `_signal_name_from_returncode`
+# checks (e.g. an ML worker subprocess gets killed while the parent JVM
+# survives and exits "normally" with its own nonzero code).
+_INFRA_FAILURE_MARKERS = (
+    "Killed",
+    "Out of memory",
+    "Cannot allocate memory",
+    "OutOfMemoryError",
+    "java.lang.OutOfMemory",
+    "std::bad_alloc",
+    "core dumped",
+)
+
+
 def _parse_build_errors(output: str) -> list[dict]:
     """
     Parse Isabelle build error output.
@@ -608,8 +662,47 @@ def _build_session_sync(
         output = result.stdout + result.stderr
         built = result.returncode == 0
 
+        # A process killed by a signal — most commonly SIGKILL from the OOM
+        # killer when concurrent builds (see `executor` above) push the
+        # container over its memory limit — produces no `***`-formatted Isar
+        # error, so `_parse_build_errors` would otherwise find nothing and
+        # this would surface as a content-free "Build failed" with no way to
+        # tell it apart from a genuine proof error. Report it explicitly.
+        signal_name = None if built else _signal_name_from_returncode(result.returncode)
+        if signal_name is not None:
+            message = (
+                f"Build process was killed by signal {signal_name} "
+                "before producing output — likely an out-of-memory kill "
+                "under concurrent build load, not a proof error."
+            )
+            logger.error(message)
+            return {
+                "built": False,
+                "build_log": output or message,
+                "errors": [{"theory": None, "line": None, "message": message}],
+                "build_time_seconds": build_time,
+            }
+
         # Parse errors from output
         errors = _parse_build_errors(output)
+
+        # The OOM killer can also take one of `isabelle build`'s own ML
+        # worker subprocesses while the parent JVM survives and exits
+        # "normally" with its own nonzero code — invisible to the exit-code
+        # check above. If the build failed but produced no structured error
+        # at all, that's the same signature (a crash upstream of Isabelle's
+        # own error reporting, not a rejected proof): flag it instead of
+        # silently falling through to a bare, content-free "Build failed".
+        if not built and not errors:
+            marker = next((m for m in _INFRA_FAILURE_MARKERS if m in output), None)
+            message = (
+                "Build failed with no Isabelle error output "
+                f"({f'saw {marker!r} in the log' if marker else 'log was empty/unparseable'})"
+                " — likely a crash or OOM kill of a build subprocess, not a "
+                "proof error."
+            )
+            logger.error(message)
+            errors = [{"theory": None, "line": None, "message": message}]
 
         logger.info(
             f"Build completed in {build_time:.2f}s. "
