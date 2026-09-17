@@ -583,6 +583,34 @@ def _parse_build_errors(output: str) -> list[dict]:
     return errors
 
 
+def _fetch_verbose_messages(isabelle_bin: str, session_name: str) -> str | None:
+    """Best-effort fetch of prover messages (`writeln`, `find_theorems`
+    results, etc.) for ``session_name`` via ``isabelle build_log -v``.
+
+    ``isabelle build -v`` only raises the *build tool's own* verbosity (job
+    scheduling, timing) — it never echoes what commands like `find_theorems`
+    or `find_consts` printed during theory processing. Those messages are
+    written to the session's build database instead, and have to be pulled
+    out afterwards with the separate `isabelle build_log` tool, which reads
+    that database by session name alone (no `-d`/`-D` needed — see the
+    Isabelle system manual §2.4). Returns ``None`` on any failure (e.g. the
+    session never got far enough to have a database), so callers can treat
+    this as pure best-effort.
+    """
+    try:
+        result = subprocess.run(
+            [isabelle_bin, "build_log", "-v", "-U", session_name],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        logger.warning(f"isabelle build_log failed for {session_name}: {e}")
+        return None
+    messages = (result.stdout + result.stderr).strip()
+    return messages or None
+
+
 def _validate_build_options(options: list[str] | None) -> list[str]:
     """Validate and filter build options against whitelist."""
     if not options:
@@ -661,6 +689,15 @@ def _build_session_sync(
         build_time = time.time() - start_time
         output = result.stdout + result.stderr
         built = result.returncode == 0
+
+        # `-v` is meant to surface command-level output (find_theorems, etc.)
+        # — `isabelle build` itself never prints that (see
+        # `_fetch_verbose_messages`), so pull it from the build database
+        # ourselves and fold it into the log the caller sees.
+        if "-v" in validated_options:
+            messages = _fetch_verbose_messages(isabelle_bin, session_name)
+            if messages:
+                output = f"{output}\n\n=== Prover messages (find_theorems, etc.) ===\n{messages}"
 
         # A process killed by a signal — most commonly SIGKILL from the OOM
         # killer when concurrent builds (see `executor` above) push the
