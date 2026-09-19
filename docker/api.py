@@ -583,32 +583,84 @@ def _parse_build_errors(output: str) -> list[dict]:
     return errors
 
 
+_YXML_X = "\x05"  # Isabelle YXML element/close delimiter (system manual §1.6)
+_YXML_Y = "\x06"  # separates a YXML tag name from its attributes
+
+
+def _yxml_to_text(data: bytes) -> str:
+    """Decode Isabelle's YXML markup down to its plain body text.
+
+    YXML (system manual §1.6) delimits elements with ASCII control chars
+    X=\\x05/Y=\\x06: ``<name attr=val>`` is ``X Y name Y attr=val X`` and
+    ``</name>`` is ``X Y X``. Splitting the document on X, any chunk
+    starting with Y is markup (a tag open/close) and gets dropped; every
+    other non-empty chunk is literal body text, kept in original order.
+    That's not full pretty-printing (no block-driven line breaks), but
+    prover output like `find_theorems` results already embeds its own
+    line breaks as literal text, so this reproduces it faithfully enough
+    to hand back to a caller.
+    """
+    text = data.decode("utf-8", errors="replace")
+    return "".join(
+        chunk for chunk in text.split(_YXML_X) if chunk and not chunk.startswith(_YXML_Y)
+    )
+
+
 def _fetch_verbose_messages(isabelle_bin: str, session_name: str) -> str | None:
     """Best-effort fetch of prover messages (`writeln`, `find_theorems`
-    results, etc.) for ``session_name`` via ``isabelle build_log -v``.
+    results, etc.) recorded for ``session_name`` during the build that just
+    ran.
 
     ``isabelle build -v`` only raises the *build tool's own* verbosity (job
     scheduling, timing) — it never echoes what commands like `find_theorems`
-    or `find_consts` printed during theory processing. Those messages are
-    written to the session's build database instead, and have to be pulled
-    out afterwards with the separate `isabelle build_log` tool, which reads
-    that database by session name alone (no `-d`/`-D` needed — see the
-    Isabelle system manual §2.4). Returns ``None`` on any failure (e.g. the
-    session never got far enough to have a database), so callers can treat
-    this as pure best-effort.
+    printed during theory processing. The ostensibly-for-this tool,
+    ``isabelle build_log -v``, doesn't work either in this Isabelle version:
+    its listing of "used theories" is driven by a `theory_timing` protocol
+    marker that plain `isabelle build` never actually emits (confirmed even
+    against the prebuilt `HOL` session — `isabelle build_log -T HOL.Nat HOL`
+    reports "Unknown theories"), so it always comes back empty.
+
+    The message text itself *is* recorded regardless, unconditionally, per
+    theory, as a `PIDE/messages` export in the session's build database
+    (`isabelle export -x "*:PIDE/messages"` finds it by session name alone,
+    same as `build_log` would have). Pull that out directly and decode its
+    YXML. Returns ``None`` on any failure, so callers can treat this as pure
+    best-effort.
     """
+    export_dir = tempfile.mkdtemp(prefix="isabelle_export_")
     try:
         result = subprocess.run(
-            [isabelle_bin, "build_log", "-v", "-U", session_name],
+            [
+                isabelle_bin, "export",
+                "-O", export_dir,
+                "-x", "*:PIDE/messages",
+                "-n",
+                session_name,
+            ],
             capture_output=True,
             text=True,
             timeout=60,
         )
+        if result.returncode != 0:
+            logger.warning(f"isabelle export failed for {session_name}: {result.stderr}")
+            return None
+
+        chunks = []
+        for root, _dirs, files in os.walk(export_dir):
+            if "messages" not in files:
+                continue
+            path = os.path.join(root, "messages")
+            theory = os.path.basename(os.path.dirname(root))
+            with open(path, "rb") as f:
+                text = _yxml_to_text(f.read()).strip()
+            if text:
+                chunks.append(f"--- {theory} ---\n{text}")
+        return "\n\n".join(sorted(chunks)) or None
     except (subprocess.TimeoutExpired, OSError) as e:
-        logger.warning(f"isabelle build_log failed for {session_name}: {e}")
+        logger.warning(f"isabelle export failed for {session_name}: {e}")
         return None
-    messages = (result.stdout + result.stderr).strip()
-    return messages or None
+    finally:
+        shutil.rmtree(export_dir, ignore_errors=True)
 
 
 def _validate_build_options(options: list[str] | None) -> list[str]:
