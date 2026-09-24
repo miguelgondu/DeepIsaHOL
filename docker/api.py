@@ -682,11 +682,63 @@ def _validate_build_options(options: list[str] | None) -> list[str]:
     return validated
 
 
+def _list_descendants(pid: int) -> list[int]:
+    """Every descendant of ``pid`` (children, grandchildren, ...), found by
+    walking ``/proc`` rather than by process group.
+
+    Isabelle's own subprocess machinery calls ``setsid()`` on each process
+    it launches internally (confirmed in practice: the actual ``poly``
+    process doing proof search, and a `Naproche` helper server, each end up
+    in a *new* session/process group of their own, not the top-level
+    ``isabelle build`` launcher's group). That means a single
+    ``os.killpg`` on the launcher's group only reaches the launcher itself
+    — the real CPU-heavy work underneath survives as an orphan. Walking
+    the actual parent/child tree via each process's ``/proc/<pid>/stat``
+    finds it regardless of how many nested ``setsid`` calls sit in between.
+    """
+    children: dict[int, list[int]] = {}
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/stat") as f:
+                stat = f.read()
+            # `comm` (2nd field) is parenthesized and may itself contain
+            # spaces/parens, so split on the *last* ')' rather than field index.
+            after_comm = stat.rsplit(")", 1)[1].split()
+            ppid = int(after_comm[1])
+        except (OSError, IndexError, ValueError):
+            continue
+        children.setdefault(ppid, []).append(int(entry))
+
+    descendants = []
+    frontier = [pid]
+    while frontier:
+        frontier = [c for p in frontier for c in children.get(p, ())]
+        descendants.extend(frontier)
+    return descendants
+
+
+def _kill_process_tree(pid: int) -> None:
+    """SIGKILL ``pid`` and every descendant found via `_list_descendants`.
+
+    The descendant walk must happen before any killing starts: once a
+    process dies its children are reparented (to pid 1 in this container),
+    which would sever the very parent/child links we're trying to follow.
+    """
+    for p in _list_descendants(pid) + [pid]:
+        try:
+            os.kill(p, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
 def _build_session_sync(
     session_name: str,
     root_content: str,
     theory_files: dict[str, str],
-    options: list[str] | None
+    options: list[str] | None,
+    timeout_seconds: int,
 ) -> dict:
     """
     Synchronously build an Isabelle session.
@@ -730,17 +782,50 @@ def _build_session_sync(
 
         logger.info(f"Running build command: {' '.join(cmd)}")
 
-        # Run the build
-        result = subprocess.run(
+        # Popen (not subprocess.run) so a timeout below can actually kill the
+        # whole process tree via _kill_process_tree — subprocess.run's own
+        # timeout only kills its immediate child, which would leave isabelle
+        # build's JVM/poly descendants (the ones actually burning CPU on a
+        # runaway proof search) running forever, silently occupying one of
+        # this container's fixed executor slots. start_new_session detaches
+        # the build from this process's own session (isolation, not what
+        # makes the kill work — Isabelle setsid()s its own children too, so
+        # _kill_process_tree walks /proc by parent pid rather than relying
+        # on process groups).
+        proc = subprocess.Popen(
             cmd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=7200  # Hard limit of 2 hours
+            start_new_session=True,
         )
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout_seconds)
+            returncode = proc.returncode
+        except subprocess.TimeoutExpired:
+            build_time = time.time() - start_time
+            logger.error(
+                f"Build exceeded {timeout_seconds}s — killing process group "
+                f"for pid {proc.pid} instead of leaving it to run unbounded"
+            )
+            _kill_process_tree(proc.pid)
+            # Drain whatever was buffered before the kill; the process is
+            # dead now so this returns immediately instead of blocking.
+            stdout, stderr = proc.communicate()
+            message = (
+                f"Build timed out after {timeout_seconds} seconds and was "
+                "killed (including its JVM/poly subprocesses)"
+            )
+            return {
+                "built": False,
+                "build_log": (stdout or "") + (stderr or "") or message,
+                "errors": [{"theory": None, "line": None, "message": message}],
+                "build_time_seconds": build_time,
+            }
 
         build_time = time.time() - start_time
-        output = result.stdout + result.stderr
-        built = result.returncode == 0
+        output = stdout + stderr
+        built = returncode == 0
 
         # `-v` is meant to surface command-level output (find_theorems, etc.)
         # — `isabelle build` itself never prints that (see
@@ -757,7 +842,7 @@ def _build_session_sync(
         # error, so `_parse_build_errors` would otherwise find nothing and
         # this would surface as a content-free "Build failed" with no way to
         # tell it apart from a genuine proof error. Report it explicitly.
-        signal_name = None if built else _signal_name_from_returncode(result.returncode)
+        signal_name = None if built else _signal_name_from_returncode(returncode)
         if signal_name is not None:
             message = (
                 f"Build process was killed by signal {signal_name} "
@@ -867,7 +952,12 @@ async def build_session(request: BuildRequest):
         )
 
     try:
-        # Run the build in the thread pool with timeout
+        # Run the build in the thread pool. The real deadline is enforced
+        # inside `_build_session_sync` itself (it kills the isabelle build
+        # process group on `timeout_seconds`), so this outer `wait_for` is
+        # just a safety margin for the file I/O/kill/drain overhead around
+        # that — it must never fire first, or we'd be back to abandoning a
+        # still-running build that leaks an executor slot.
         loop = asyncio.get_event_loop()
         result = await asyncio.wait_for(
             loop.run_in_executor(
@@ -876,9 +966,10 @@ async def build_session(request: BuildRequest):
                 request.session_name,
                 request.root_content,
                 request.theory_files,
-                request.options
+                request.options,
+                request.timeout_seconds,
             ),
-            timeout=request.timeout_seconds
+            timeout=request.timeout_seconds + 30
         )
 
         # Convert error dicts to BuildError models
