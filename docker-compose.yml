@@ -6,7 +6,15 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        # Benchmark heap-build parallelism. Empty THREADS => auto (all CPUs the
+        # Which Isabelle library sessions get prebuilt into the `Benchmark`
+        # heap. Defaults to the cheapest possible heap (bare HOL, seconds to
+        # build). See README.md ("Configuring which Isabelle libraries are
+        # built") for the full session list and a worked example reproducing
+        # the old always-on Analysis/Probability set.
+        DEEPISAHOL_PARENT_SESSION: ${DEEPISAHOL_PARENT_SESSION:-HOL}
+        DEEPISAHOL_EXTRA_SESSIONS: ${DEEPISAHOL_EXTRA_SESSIONS:-}
+        # Benchmark heap-build parallelism (only matters once the config
+        # above is non-trivial). Empty THREADS => auto (all CPUs the
         # build sees, capped by RAM). Override, e.g.
         # BENCHMARK_THREADS=6 BENCHMARK_JOBS=2 docker compose build deepisahol
         BENCHMARK_THREADS: ${BENCHMARK_THREADS:-}

@@ -93,6 +93,24 @@ class HealthResponse(BaseModel):
     message: str
 
 
+class SessionsResponse(BaseModel):
+    """Which Isabelle sessions the running image's `Benchmark` heap was
+    actually built from (DEEPISAHOL_PARENT_SESSION / DEEPISAHOL_EXTRA_SESSIONS
+    at Docker build time)."""
+    parent_session: Optional[str] = Field(
+        default=None,
+        description="Session `Benchmark` extends, e.g. HOL or HOL-Probability"
+    )
+    extra_sessions: list[str] = Field(
+        default_factory=list,
+        description="Sibling sessions built and loaded alongside the parent"
+    )
+    benchmark_theories: list[str] = Field(
+        default_factory=list,
+        description="Umbrella theories loaded into the Benchmark heap, one per extra session"
+    )
+
+
 class BuildRequest(BaseModel):
     """Request model for building an Isabelle session."""
     session_name: str = Field(
@@ -196,6 +214,37 @@ def _check_gateway_available() -> bool:
         return len(ports) > 0
     except Exception:
         return False
+
+
+_BENCHMARK_ROOT_PATH = "/app/benchmark/ROOT"
+
+
+def _read_benchmark_info() -> dict:
+    """Parse the running image's generated `benchmark/ROOT` (see
+    `benchmark/gen_root.py`) to report which sessions/theories the
+    `Benchmark` heap was actually built with. Live-parsed rather than
+    cached from a build-time env var so this can never drift from the
+    heap that's actually on disk."""
+    try:
+        with open(_BENCHMARK_ROOT_PATH) as f:
+            text = f.read()
+    except OSError:
+        return {"parent_session": None, "extra_sessions": [], "benchmark_theories": []}
+
+    parent_match = re.search(r'session\s+Benchmark\s*=\s*"?([\w.-]+)"?\s*\+', text)
+    parent = parent_match.group(1) if parent_match else None
+
+    sessions_match = re.search(r'\n[ \t]*sessions[ \t]*\n((?:[ \t]*"[^"]+"[ \t]*\n)+)', text)
+    extra_sessions = re.findall(r'"([^"]+)"', sessions_match.group(1)) if sessions_match else []
+
+    theories_match = re.search(r'\n[ \t]*theories[ \t]*\n((?:[ \t]*"[^"]+"[ \t]*\n?)+)', text)
+    theories = re.findall(r'"([^"]+)"', theories_match.group(1)) if theories_match else []
+
+    return {
+        "parent_session": parent,
+        "extra_sessions": extra_sessions,
+        "benchmark_theories": theories,
+    }
 
 
 # Isabelle Unicode to ASCII mappings
@@ -441,6 +490,17 @@ async def health_check():
             gateway_available=False,
             message="DeepIsaHOL API is running but gateway is not available"
         )
+
+
+@app.get("/sessions", response_model=SessionsResponse)
+async def sessions_info():
+    """Report which Isabelle sessions/theories this image's `Benchmark` heap
+    was actually built from. This is the source of truth for callers
+    deciding what a submitted theory can `imports` without triggering an
+    on-the-fly build — see `DEEPISAHOL_PARENT_SESSION` /
+    `DEEPISAHOL_EXTRA_SESSIONS` in the Dockerfile.
+    """
+    return SessionsResponse(**_read_benchmark_info())
 
 
 @app.post("/verify", response_model=VerifyResponse)
@@ -1018,6 +1078,7 @@ async def root():
         "description": "REST API for verifying Isabelle/HOL proofs",
         "endpoints": {
             "/health": "GET - Health check",
+            "/sessions": "GET - Which Isabelle sessions the Benchmark heap was built with",
             "/verify": "POST - Verify a theory file",
             "/build": "POST - Build an Isabelle session"
         }

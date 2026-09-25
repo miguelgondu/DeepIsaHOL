@@ -50,17 +50,32 @@ RUN echo "Downloading Isabelle 2025-2..." && \
 # `isabelle components -u ./afp/thys/` here and the matching COPY + register in the
 # runtime stage, and point Directories.isabelle_afp at /app/afp/thys/ below.
 
-# Pre-build the Isabelle library session heaps used by the benchmark (analysis,
-# probability, number theory, algebra, combinatorics, ...). `-o system_heaps`
+# Which Isabelle library sessions get prebuilt into the `Benchmark` heap.
+# Defaults to the cheapest possible heap (bare HOL, which ships prebuilt with
+# the distribution, so the isabelle build below is a no-op). Set these to
+# reproduce the old always-on Analysis/Probability/+8-siblings heap, e.g.:
+#   --build-arg DEEPISAHOL_PARENT_SESSION=HOL-Probability
+#   --build-arg DEEPISAHOL_EXTRA_SESSIONS=HOL-Number_Theory,HOL-Algebra,HOL-Combinatorics,HOL-Cardinals,HOL-Computational_Algebra,HOL-Decision_Procs,HOL-Real_Asymp,HOL-Eisbach,HOL-Library
+# See DeepIsaHOL/README.md for the full list of supported session names and
+# what each one buys you; benchmark/gen_root.py errors out (naming the
+# supported list) on anything it doesn't recognize.
+ARG DEEPISAHOL_PARENT_SESSION="HOL"
+ARG DEEPISAHOL_EXTRA_SESSIONS=""
+
+# Pre-build the Isabelle library session heaps requested above. `-o system_heaps`
 # writes the heaps into the distribution tree ($ISABELLE_HOME/heaps) instead of
 # the per-user dir, so the existing `COPY --from=builder /build/Isabelle2025-2`
 # in the runtime stage carries them (the runtime `isabelle build` still searches
 # the system heap dir as a fallback with system_heaps=false). Building
 # `Benchmark` also builds+persists every session it depends on.
 #
-# This layer is EXPENSIVE: ~1-2 h wall time. It caches until benchmark/ROOT changes.
+# With the defaults above this layer is trivial (seconds). With the full
+# Analysis/Probability/+8-siblings config it's EXPENSIVE: ~1-2 h wall time.
+# It caches until the generated benchmark/ROOT changes (i.e. until either
+# DEEPISAHOL_* arg above changes, or benchmark/gen_root.py itself does).
 #
-# Parallelism (override at build time, e.g. --build-arg BENCHMARK_THREADS=6):
+# Parallelism (override at build time, e.g. --build-arg BENCHMARK_THREADS=6)
+# only matters for non-trivial configs:
 #   BENCHMARK_THREADS - `-o threads`, parallelism *within* a session. Empty (the
 #                       default) => auto: all CPUs the build sees ($(nproc)),
 #                       capped at ~1 per 3 GB of RAM so it can't OOM-kill itself
@@ -72,6 +87,10 @@ RUN echo "Downloading Isabelle 2025-2..." && \
 ARG BENCHMARK_THREADS=""
 ARG BENCHMARK_JOBS=1
 COPY benchmark /build/benchmark
+RUN DEEPISAHOL_PARENT_SESSION="${DEEPISAHOL_PARENT_SESSION}" \
+    DEEPISAHOL_EXTRA_SESSIONS="${DEEPISAHOL_EXTRA_SESSIONS}" \
+    python3 /build/benchmark/gen_root.py > /build/benchmark/ROOT && \
+    echo "Generated benchmark/ROOT:" && cat /build/benchmark/ROOT
 RUN set -eu; \
     cores="$(nproc)"; \
     mem_gb="$(awk '/^MemTotal:/ {printf "%d", $2 / 1024 / 1024}' /proc/meminfo)"; \
